@@ -143,6 +143,10 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [exchangePatient, setExchangePatient] = useState<Patient | null>(null);
+  const [exchangeReason, setExchangeReason] = useState("Troca programada");
+  const [exchangeProfessional, setExchangeProfessional] = useState("");
+  const [exchangeNotes, setExchangeNotes] = useState("");
   const [tab, setTab] = useState<"patients" | "history">("patients");
 
   async function loadData(sb: NonNullable<ReturnType<typeof getSupabase>>) {
@@ -286,38 +290,65 @@ export default function Home() {
   }
 
   async function registerExchange(patient: Patient) {
-    if (!staff) return;
-    const sb = getSupabase();
-    if (!sb) return;
+  if (!staff) return;
 
-    const confirmed = window.confirm(
-      "Confirmar registro da troca do conector de " + patient.full_name +
-      ", leito " + patient.bed + "? O registro iniciará um novo ciclo e preservará o histórico."
-    );
-    if (!confirmed) return;
+  const sb = getSupabase();
+  if (!sb) return;
 
-    setBusy(true);
-    setError("");
-    setNotice("");
-
-    try {
-      const { error: rpcError } = await sb.rpc("register_connector_exchange", {
-        p_patient_id: patient.id,
-        p_professional_name: staff.full_name,
-        p_notes: null,
-      });
-
-      if (rpcError) throw rpcError;
-
-      setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
-      await loadData(sb);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Não foi possível registrar a troca.");
-    } finally {
-      setBusy(false);
-    }
+  if (!exchangeProfessional.trim()) {
+    setError("Informe o profissional responsável.");
+    return;
   }
 
+  if (!exchangeReason.trim()) {
+    setError("Selecione o motivo da troca.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    "Confirmar a troca do conector de " +
+      patient.full_name +
+      ", leito " +
+      patient.bed +
+      "? O registro iniciará um novo ciclo e preservará o histórico."
+  );
+
+  if (!confirmed) return;
+
+  setBusy(true);
+  setError("");
+  setNotice("");
+
+  try {
+    const { error: rpcError } = await sb.rpc(
+      "register_connector_exchange",
+      {
+        p_patient_id: patient.id,
+        p_professional_name: exchangeProfessional.trim(),
+        p_notes: exchangeNotes.trim() || null,
+        p_reason: exchangeReason.trim(),
+      }
+    );
+
+    if (rpcError) throw rpcError;
+
+    setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
+    setExchangePatient(null);
+    setExchangeNotes("");
+    setExchangeReason("Troca programada");
+    setExchangeProfessional(staff.full_name);
+
+    await loadData(sb);
+  } catch (err) {
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Não foi possível registrar a troca."
+    );
+  } finally {
+    setBusy(false);
+  }
+}
   const activePatients = patients.filter(p =>
     !p.follow_up_closed_at &&
     !String(p.follow_up_status).toLowerCase().includes("closed") &&
@@ -445,6 +476,32 @@ export default function Home() {
             </form>
           </section>
         )}
+        {showForm && (
+          <section style={{ ...panelStyle, marginBottom: 18 }}>
+            <h3 style={{ marginTop: 0 }}>Cadastrar paciente</h3>
+            <form onSubmit={registerPatient} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 13 }}>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Nome completo
+                <input name="full_name" required maxLength={160} style={inputStyle} />
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Leito
+                <input name="bed" required maxLength={30} style={inputStyle} />
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Tipo de cateter
+                <select name="catheter_type" required defaultValue="" style={inputStyle}>
+                  <option value="" disabled>Selecione</option>
+                  {catheterTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                </select>
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Data de instalação/troca do conector (Dia 1)
+                <input name="start_date" type="date" required defaultValue={todayFortaleza()} style={inputStyle} />
+              </label>
+              <div style={{ display: "flex", gap: 8, alignItems: "end" }}>
+                <button disabled={busy} type="submit" style={primaryButton}>{busy ? "Salvando…" : "Salvar paciente"}</button>
+                <button type="button" onClick={() => setShowForm(false)} style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}>Cancelar</button>
+              </div>
+            </form>
+          </section>
+        )}
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 20 }}>
           {[
@@ -487,9 +544,18 @@ export default function Home() {
                       <span>Troca prevista: <strong>{cycle ? dateLabel(addDays(cycle.start_date, 3)) : "—"}</strong></span>
                     </div>
                     {cycle && (
-                      <button disabled={busy} onClick={() => void registerExchange(patient)} style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}>
-                        <RefreshCw size={16} /> Registrar troca
-                      </button>
+                      <button
+  disabled={busy}
+  onClick={() => {
+    setExchangePatient(patient);
+    setExchangeReason("Troca programada");
+    setExchangeProfessional(staff?.full_name ?? "");
+    setExchangeNotes("");
+  }}
+  style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
+>
+  <RefreshCw size={16} /> Registrar troca
+</button>
                     )}
                   </article>
                 ))}
