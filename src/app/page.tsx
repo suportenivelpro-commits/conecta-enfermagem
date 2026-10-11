@@ -290,65 +290,66 @@ export default function Home() {
   }
 
   async function registerExchange(patient: Patient) {
-  if (!staff) return;
+    if (!staff) return;
 
-  const sb = getSupabase();
-  if (!sb) return;
+    const sb = getSupabase();
+    if (!sb) return;
 
-  if (!exchangeProfessional.trim()) {
-    setError("Informe o profissional responsável.");
-    return;
-  }
+    if (!exchangeProfessional.trim()) {
+      setError("Informe o profissional responsável.");
+      return;
+    }
 
-  if (!exchangeReason.trim()) {
-    setError("Selecione o motivo da troca.");
-    return;
-  }
+    if (!exchangeReason.trim()) {
+      setError("Selecione o motivo da troca.");
+      return;
+    }
 
-  const confirmed = window.confirm(
-    "Confirmar a troca do conector de " +
-      patient.full_name +
-      ", leito " +
-      patient.bed +
-      "? O registro iniciará um novo ciclo e preservará o histórico."
-  );
-
-  if (!confirmed) return;
-
-  setBusy(true);
-  setError("");
-  setNotice("");
-
-  try {
-    const { error: rpcError } = await sb.rpc(
-      "register_connector_exchange",
-      {
-        p_patient_id: patient.id,
-        p_professional_name: exchangeProfessional.trim(),
-        p_notes: exchangeNotes.trim() || null,
-        p_reason: exchangeReason.trim(),
-      }
+    const confirmed = window.confirm(
+      "Confirmar a troca do conector de " +
+        patient.full_name +
+        ", leito " +
+        patient.bed +
+        "? O registro iniciará um novo ciclo e preservará o histórico."
     );
 
-    if (rpcError) throw rpcError;
+    if (!confirmed) return;
 
-    setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
-    setExchangePatient(null);
-    setExchangeNotes("");
-    setExchangeReason("Troca programada");
-    setExchangeProfessional(staff.full_name);
+    setBusy(true);
+    setError("");
+    setNotice("");
 
-    await loadData(sb);
-  } catch (err) {
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Não foi possível registrar a troca."
-    );
-  } finally {
-    setBusy(false);
+    try {
+      const { error: rpcError } = await sb.rpc(
+        "register_connector_exchange",
+        {
+          p_patient_id: patient.id,
+          p_professional_name: exchangeProfessional.trim(),
+          p_notes: exchangeNotes.trim() || null,
+          p_reason: exchangeReason.trim(),
+        }
+      );
+
+      if (rpcError) throw rpcError;
+
+      setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
+      setExchangePatient(null);
+      setExchangeNotes("");
+      setExchangeReason("Troca programada");
+      setExchangeProfessional(staff.full_name);
+
+      await loadData(sb);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Não foi possível registrar a troca."
+      );
+    } finally {
+      setBusy(false);
+    }
   }
-}
+
   const activePatients = patients.filter(p =>
     !p.follow_up_closed_at &&
     !String(p.follow_up_status).toLowerCase().includes("closed") &&
@@ -503,6 +504,102 @@ export default function Home() {
           </section>
         )}
 
+        {exchangePatient && (
+          <section
+            style={{
+              ...panelStyle,
+              position: "fixed",
+              inset: 0,
+              background: "rgba(15, 23, 42, 0.38)",
+              display: "grid",
+              placeItems: "center",
+              zIndex: 50,
+              padding: 20,
+            }}
+            onClick={() => setExchangePatient(null)}
+          >
+            <div
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                background: "#fff",
+                borderRadius: 16,
+                padding: 20,
+                border: "1px solid #e2e8f0",
+              }}
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 style={{ marginTop: 0 }}>Registrar troca</h3>
+
+              <div style={{ display: "grid", gap: 14 }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#475569", marginBottom: 6 }}>Paciente</div>
+                  <strong>{exchangePatient.full_name}</strong>
+                  <div style={{ color: "#64748b", fontSize: 13 }}>Leito {exchangePatient.bed}</div>
+                </div>
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Profissional responsável
+                  <input
+                    value={exchangeProfessional}
+                    onChange={e => setExchangeProfessional(e.target.value)}
+                    style={inputStyle}
+                    placeholder="Nome do profissional"
+                  />
+                </label>
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Motivo da troca
+                  <select
+                    value={exchangeReason}
+                    onChange={e => setExchangeReason(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="Troca programada">Troca programada</option>
+                    <option value="Troca por obstrução">Troca por obstrução</option>
+                    <option value="Troca por infecção">Troca por infecção</option>
+                    <option value="Troca por vazamento">Troca por vazamento</option>
+                    <option value="Troca por mobilidade">Troca por mobilidade</option>
+                    <option value="Outros">Outros</option>
+                  </select>
+                </label>
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Observações
+                  <textarea
+                    value={exchangeNotes}
+                    onChange={e => setExchangeNotes(e.target.value)}
+                    rows={4}
+                    style={{ ...inputStyle, resize: "vertical" }}
+                    placeholder="Descreva detalhes da troca"
+                  />
+                </label>
+
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setExchangePatient(null)}
+                    style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}
+                  >
+                    Cancelar
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      void registerExchange(exchangePatient);
+                    }}
+                    style={{ ...primaryButton, opacity: busy ? 0.7 : 1 }}
+                  >
+                    {busy ? "Registrando…" : "Confirmar troca"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 20 }}>
           {[
             { label: "Em acompanhamento", value: cards.length, color: "#0369a1" },
@@ -545,17 +642,17 @@ export default function Home() {
                     </div>
                     {cycle && (
                       <button
-  disabled={busy}
-  onClick={() => {
-    setExchangePatient(patient);
-    setExchangeReason("Troca programada");
-    setExchangeProfessional(staff?.full_name ?? "");
-    setExchangeNotes("");
-  }}
-  style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
->
-  <RefreshCw size={16} /> Registrar troca
-</button>
+                        disabled={busy}
+                        onClick={() => {
+                          setExchangePatient(patient);
+                          setExchangeReason("Troca programada");
+                          setExchangeProfessional(staff?.full_name ?? "");
+                          setExchangeNotes("");
+                        }}
+                        style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
+                      >
+                        <RefreshCw size={16} /> Registrar troca
+                      </button>
                     )}
                   </article>
                 ))}
