@@ -39,6 +39,7 @@ type EventRow = {
   event_date: string;
   professional_name: string;
   reason: string | null;
+  notes: string | null;
 };
 
 function todayFortaleza() {
@@ -53,8 +54,16 @@ function todayFortaleza() {
   return get("year") + "-" + get("month") + "-" + get("day");
 }
 
-function addDays(date: string, days: number) {
-  const [y, m, d] = date.slice(0, 10).split("-").map(Number);
+function safeDate(date: unknown): string {
+  if (!date) return "";
+  if (date instanceof Date) return date.toISOString().slice(0, 10);
+  return String(date).slice(0, 10);
+}
+
+function addDays(date: unknown, days: number) {
+  const str = safeDate(date);
+  if (!str) return "—";
+  const [y, m, d] = str.split("-").map(Number);
   const result = new Date(Date.UTC(y, m - 1, d + days));
   return [
     result.getUTCFullYear(),
@@ -63,25 +72,87 @@ function addDays(date: string, days: number) {
   ].join("-");
 }
 
-function dayNumber(date: string) {
-  const [y, m, d] = date.slice(0, 10).split("-").map(Number);
+function dayNumber(date: unknown) {
+  const str = safeDate(date);
+  if (!str) return 0;
+  const [y, m, d] = str.split("-").map(Number);
   return Math.floor(Date.UTC(y, m - 1, d) / 86400000);
 }
 
-function dateLabel(date: string) {
-  if (!date) return "—";
-  const [y, m, d] = date.slice(0, 10).split("-");
-  return d + "/" + m + "/" + y;
+function dateLabel(date: unknown) {
+  const str = safeDate(date);
+  if (!str) return "—";
+  const [y, m, d] = str.split("-");
+  return d && m && y ? `${d}/${m}/${y}` : "—";
 }
 
 function cycleStatus(start: string) {
   const diff = dayNumber(todayFortaleza()) - dayNumber(start);
   if (diff < 0) return { label: "Data futura", color: "#64748b", key: "future" };
   if (diff <= 1) return { label: "No prazo", color: "#15803d", key: "ok" };
-  if (diff === 2) return { label: "Troca amanhã", color: "#b45309", key: "soon" };
-  if (diff === 3) return { label: "Troca hoje", color: "#c2410c", key: "today" };
-  return { label: "Prazo ultrapassado", color: "#b91c1c", key: "late" };
+  if (diff === 2) return { label: "Troca amanhã", color: "#0284c7", key: "soon" };
+  if (diff === 3) return { label: "Trocar hoje", color: "#ea580c", key: "today" };
+  return { label: "Prazo ultrapassado", color: "#dc2626", key: "late" };
 }
+
+type KanbanColumn = {
+  key: string;
+  title: string;
+  subtitle: string;
+  color: string;
+  bgHeader: string;
+  border: string;
+  badgeBg: string;
+  badgeColor: string;
+  filterKeys: string[];
+};
+
+const KANBAN_COLUMNS: KanbanColumn[] = [
+  {
+    key: "ok",
+    title: "No Prazo",
+    subtitle: "Dias 1 e 2 do ciclo",
+    color: "#15803d",
+    bgHeader: "#f0fdf4",
+    border: "#bbf7d0",
+    badgeBg: "#dcfce7",
+    badgeColor: "#166534",
+    filterKeys: ["ok", "future"],
+  },
+  {
+    key: "soon",
+    title: "Trocar Amanhã",
+    subtitle: "Dia 3 do ciclo",
+    color: "#0284c7",
+    bgHeader: "#f0f9ff",
+    border: "#bae6fd",
+    badgeBg: "#e0f2fe",
+    badgeColor: "#0369a1",
+    filterKeys: ["soon"],
+  },
+  {
+    key: "today",
+    title: "Trocar Hoje",
+    subtitle: "Dia 4 do ciclo (Prazo)",
+    color: "#ea580c",
+    bgHeader: "#fff7ed",
+    border: "#fed7aa",
+    badgeBg: "#ffedd5",
+    badgeColor: "#9a3412",
+    filterKeys: ["today"],
+  },
+  {
+    key: "late",
+    title: "Prazo Ultrapassado",
+    subtitle: "Dia 5 em diante",
+    color: "#dc2626",
+    bgHeader: "#fef2f2",
+    border: "#fecaca",
+    badgeBg: "#fee2e2",
+    badgeColor: "#991b1b",
+    filterKeys: ["late"],
+  },
+];
 
 const catheterTypes = [
   "Cateter de hemodiálise",
@@ -357,13 +428,14 @@ export default function Home() {
     (item.patient.full_name + " " + item.patient.bed + " " + item.patient.catheter_type)
       .toLowerCase().includes(query.toLowerCase())
   ).sort((a, b) =>
-    priority[a.status.key] - priority[b.status.key] ||
-    a.patient.bed.localeCompare(b.patient.bed, "pt-BR", { numeric: true })
+    (priority[a.status?.key] ?? 4) - (priority[b.status?.key] ?? 4) ||
+    String(a.patient?.bed ?? "").localeCompare(String(b.patient?.bed ?? ""), "pt-BR", { numeric: true })
   );
 
   const countLate = cards.filter(c => c.status.key === "late").length;
   const countToday = cards.filter(c => c.status.key === "today").length;
   const countSoon = cards.filter(c => c.status.key === "soon").length;
+  const countOk = cards.filter(c => c.status.key === "ok" || c.status.key === "future").length;
 
   if (loading) {
     return <main style={{ ...pageStyle, display: "grid", placeItems: "center" }}>Carregando Conecta Enfermagem…</main>;
@@ -570,9 +642,10 @@ export default function Home() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 20 }}>
           {[
             { label: "Em acompanhamento", value: cards.length, color: "#0369a1" },
-            { label: "Troca hoje", value: countToday, color: "#c2410c" },
-            { label: "Troca amanhã", value: countSoon, color: "#b45309" },
-            { label: "Prazo ultrapassado", value: countLate, color: "#b91c1c" },
+            { label: "No prazo", value: countOk, color: "#15803d" },
+            { label: "Trocar amanhã", value: countSoon, color: "#0284c7" },
+            { label: "Trocar hoje", value: countToday, color: "#ea580c" },
+            { label: "Prazo ultrapassado", value: countLate, color: "#dc2626" },
           ].map(item => (
             <section key={item.label} style={panelStyle}>
               <div style={{ color: "#64748b", fontSize: 13 }}>{item.label}</div>
@@ -587,42 +660,230 @@ export default function Home() {
         </div>
 
         {tab === "patients" ? (
-          <section style={panelStyle}>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 16, maxWidth: 500 }}>
-              <Search size={19} color="#64748b" />
-              <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar por paciente, leito ou cateter" style={inputStyle} />
+          <section style={{ ...panelStyle, padding: "20px 16px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flex: "1 1 300px", maxWidth: 460 }}>
+                <Search size={19} color="#64748b" />
+                <input
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder="Buscar por paciente, leito ou cateter..."
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{ fontSize: 13, color: "#64748b" }}>
+                Total: <strong>{cards.length}</strong> {cards.length === 1 ? "paciente" : "pacientes"}
+              </div>
             </div>
-            {cards.length === 0 ? <p style={{ color: "#64748b" }}>Nenhum paciente em acompanhamento encontrado.</p> : (
-              <div style={{ display: "grid", gap: 12 }}>
-                {cards.map(({ patient, cycle, status }) => (
-                  <article key={patient.id} style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 16 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                      <div>
-                        <strong style={{ fontSize: 17 }}>{patient.full_name}</strong>
-                        <div style={{ color: "#64748b", fontSize: 13, marginTop: 5 }}>Leito {patient.bed} · {patient.catheter_type}</div>
-                      </div>
-                      <span style={{ alignSelf: "start", background: status.color + "18", color: status.color, borderRadius: 20, padding: "7px 10px", fontSize: 12, fontWeight: 700 }}>{status.label}</span>
-                    </div>
-                    <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 14, color: "#475569", fontSize: 13 }}>
-                      <span>Dia 1 do ciclo: <strong>{cycle ? dateLabel(cycle.start_date) : "Sem ciclo"}</strong></span>
-                      <span>Troca prevista: <strong>{cycle ? dateLabel(addDays(cycle.start_date, 3)) : "—"}</strong></span>
-                    </div>
-                    {cycle && (
-                      <button
-                        disabled={busy}
-                        onClick={() => {
-                          setExchangePatient(patient);
-                          setExchangeReason("Troca programada");
-                          setExchangeProfessional(staff?.full_name ?? "");
-                          setExchangeNotes("");
+
+            {cards.length === 0 && query ? (
+              <div style={{ textAlign: "center", padding: "40px 20px", color: "#64748b" }}>
+                <p style={{ margin: 0, fontSize: 15 }}>Nenhum paciente encontrado para &ldquo;{query}&rdquo;.</p>
+              </div>
+            ) : (
+              <div
+                style={{
+                  overflowX: "auto",
+                  paddingBottom: 12,
+                  WebkitOverflowScrolling: "touch",
+                }}
+              >
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(4, minmax(260px, 1fr))",
+                    gap: 16,
+                    minWidth: 1080,
+                    alignItems: "start",
+                  }}
+                >
+                  {KANBAN_COLUMNS.map(col => {
+                    const colCards = cards.filter(c => col.filterKeys.includes(c.status.key));
+                    return (
+                      <div
+                        key={col.key}
+                        style={{
+                          background: "#f8fafc",
+                          borderRadius: 14,
+                          border: "1px solid #e2e8f0",
+                          borderTop: `4px solid ${col.color}`,
+                          padding: 14,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 12,
+                          minHeight: 220,
                         }}
-                        style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
                       >
-                        <RefreshCw size={16} /> Registrar troca
-                      </button>
-                    )}
-                  </article>
-                ))}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, paddingBottom: 10, borderBottom: "1px solid #e2e8f0" }}>
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span style={{ width: 9, height: 9, borderRadius: "50%", background: col.color, display: "inline-block" }} />
+                              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: "#1e293b" }}>{col.title}</h3>
+                            </div>
+                            <span style={{ fontSize: 11, color: "#64748b", marginTop: 3, display: "block" }}>{col.subtitle}</span>
+                          </div>
+                          <span
+                            style={{
+                              background: col.badgeBg,
+                              color: col.badgeColor,
+                              borderRadius: 12,
+                              padding: "2px 8px",
+                              fontSize: 12,
+                              fontWeight: 700,
+                              minWidth: 22,
+                              textAlign: "center",
+                            }}
+                          >
+                            {colCards.length}
+                          </span>
+                        </div>
+
+                        {colCards.length === 0 ? (
+                          <div
+                            style={{
+                              padding: "30px 12px",
+                              textAlign: "center",
+                              color: "#94a3b8",
+                              fontSize: 13,
+                              background: "#fff",
+                              borderRadius: 10,
+                              border: "1px dashed #cbd5e1",
+                            }}
+                          >
+                            Nenhum paciente
+                          </div>
+                        ) : (
+                          <div style={{ display: "grid", gap: 12 }}>
+                            {colCards.map(({ patient, cycle, status }) => {
+                              const diff = (cycle && cycle.start_date) ? dayNumber(todayFortaleza()) - dayNumber(cycle.start_date) : null;
+                              const cycleDayLabel = diff === null
+                                ? "Sem ciclo ativo"
+                                : diff < 0
+                                ? "Início futuro"
+                                : diff === 0
+                                ? "Dia 1 de 4"
+                                : diff === 1
+                                ? "Dia 2 de 4"
+                                : diff === 2
+                                ? "Dia 3 de 4 (Amanhã)"
+                                : diff === 3
+                                ? "Dia 4 de 4 (Hoje)"
+                                : `Dia ${diff + 1} de 4 (+${diff - 3}d)`;
+
+                              return (
+                                <article
+                                  key={patient.id}
+                                  style={{
+                                    background: "#fff",
+                                    borderRadius: 12,
+                                    border: "1px solid #e2e8f0",
+                                    borderLeft: `4px solid ${status.color}`,
+                                    padding: 14,
+                                    boxShadow: "0 1px 3px rgba(0, 0, 0, 0.05)",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                                    <div style={{ minWidth: 0 }}>
+                                      <strong style={{ fontSize: 15, color: "#0f172a", display: "block", wordBreak: "break-word" }}>
+                                        {patient.full_name}
+                                      </strong>
+                                      <div style={{ color: "#64748b", fontSize: 12, marginTop: 3 }}>
+                                        {patient.catheter_type}
+                                      </div>
+                                    </div>
+                                    <span
+                                      style={{
+                                        background: "#f1f5f9",
+                                        color: "#334155",
+                                        borderRadius: 6,
+                                        padding: "3px 7px",
+                                        fontSize: 12,
+                                        fontWeight: 700,
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      L. {patient.bed}
+                                    </span>
+                                  </div>
+
+                                  <div
+                                    style={{
+                                      background: col.bgHeader,
+                                      border: `1px solid ${col.border}`,
+                                      borderRadius: 8,
+                                      padding: "6px 10px",
+                                      fontSize: 12,
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      gap: 6,
+                                    }}
+                                  >
+                                    <span style={{ fontWeight: 700, color: col.badgeColor }}>
+                                      {cycleDayLabel}
+                                    </span>
+                                    <span
+                                      style={{
+                                        background: status.color + "18",
+                                        color: status.color,
+                                        borderRadius: 10,
+                                        padding: "2px 6px",
+                                        fontSize: 11,
+                                        fontWeight: 700,
+                                      }}
+                                    >
+                                      {status.label}
+                                    </span>
+                                  </div>
+
+                                  <div style={{ fontSize: 12, color: "#475569", display: "grid", gap: 4 }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
+                                      <span style={{ color: "#64748b" }}>Instalação (Dia 1):</span>
+                                      <strong>{cycle?.start_date ? dateLabel(cycle.start_date) : "—"}</strong>
+                                    </div>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
+                                      <span style={{ color: "#64748b" }}>Troca prevista (Dia 4):</span>
+                                      <strong style={{ color: status.key === "today" || status.key === "late" ? status.color : "inherit" }}>
+                                        {cycle?.start_date ? dateLabel(addDays(cycle.start_date, 3)) : "—"}
+                                      </strong>
+                                    </div>
+                                  </div>
+
+                                  {cycle && (
+                                    <button
+                                      disabled={busy}
+                                      onClick={() => {
+                                        setExchangePatient(patient);
+                                        setExchangeReason("Troca programada");
+                                        setExchangeProfessional(staff?.full_name ?? "");
+                                        setExchangeNotes("");
+                                      }}
+                                      style={{
+                                        ...primaryButton,
+                                        width: "100%",
+                                        padding: "8px 10px",
+                                        fontSize: 12,
+                                        marginTop: 4,
+                                        background: "#0369a1",
+                                        color: "#fff",
+                                        opacity: busy ? 0.65 : 1,
+                                      }}
+                                    >
+                                      <RefreshCw size={14} /> Registrar troca
+                                    </button>
+                                  )}
+                                </article>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </section>
@@ -632,7 +893,7 @@ export default function Home() {
             {events.length === 0 ? <p style={{ color: "#64748b" }}>Nenhum evento registrado.</p> : (
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, minWidth: 600 }}>
-                  <thead><tr>{["Data", "Paciente", "Evento", "Profissional", "Motivo"].map(label => <th key={label} style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #e2e8f0" }}>{label}</th>)}</tr></thead>
+                  <thead><tr>{["Data", "Paciente", "Evento", "Profissional", "Motivo", "Observação"].map(label => <th key={label} style={{ textAlign: "left", padding: 10, borderBottom: "1px solid #e2e8f0" }}>{label}</th>)}</tr></thead>
                   <tbody>
                     {events.map(event => (
                       <tr key={event.id}>
@@ -641,6 +902,7 @@ export default function Home() {
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.event_type}</td>
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.professional_name}</td>
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.reason ?? "—"}</td>
+                        <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.notes?.trim() ? event.notes : "—"}</td>
                       </tr>
                     ))}
                   </tbody>
