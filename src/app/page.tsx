@@ -290,65 +290,56 @@ export default function Home() {
   }
 
   async function registerExchange(patient: Patient) {
-  if (!staff) return;
+    if (!staff) return;
 
-  const sb = getSupabase();
-  if (!sb) return;
+    const sb = getSupabase();
+    if (!sb) return;
 
-  if (!exchangeProfessional.trim()) {
-    setError("Informe o profissional responsável.");
-    return;
+    if (!exchangeProfessional.trim()) {
+      setError("Informe o profissional responsável.");
+      return;
+    }
+
+    if (!exchangeReason.trim()) {
+      setError("Selecione o motivo da troca.");
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setNotice("");
+
+    try {
+      const { error: rpcError } = await sb.rpc(
+        "register_connector_exchange",
+        {
+          p_patient_id: patient.id,
+          p_professional_name: exchangeProfessional.trim(),
+          p_notes: exchangeNotes.trim() || null,
+          p_reason: exchangeReason.trim(),
+        }
+      );
+
+      if (rpcError) throw rpcError;
+
+      setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
+      setExchangePatient(null);
+      setExchangeNotes("");
+      setExchangeReason("Troca programada");
+      setExchangeProfessional(staff.full_name);
+
+      await loadData(sb);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Não foi possível registrar a troca."
+      );
+    } finally {
+      setBusy(false);
+    }
   }
 
-  if (!exchangeReason.trim()) {
-    setError("Selecione o motivo da troca.");
-    return;
-  }
-
-  const confirmed = window.confirm(
-    "Confirmar a troca do conector de " +
-      patient.full_name +
-      ", leito " +
-      patient.bed +
-      "? O registro iniciará um novo ciclo e preservará o histórico."
-  );
-
-  if (!confirmed) return;
-
-  setBusy(true);
-  setError("");
-  setNotice("");
-
-  try {
-    const { error: rpcError } = await sb.rpc(
-      "register_connector_exchange",
-      {
-        p_patient_id: patient.id,
-        p_professional_name: exchangeProfessional.trim(),
-        p_notes: exchangeNotes.trim() || null,
-        p_reason: exchangeReason.trim(),
-      }
-    );
-
-    if (rpcError) throw rpcError;
-
-    setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
-    setExchangePatient(null);
-    setExchangeNotes("");
-    setExchangeReason("Troca programada");
-    setExchangeProfessional(staff.full_name);
-
-    await loadData(sb);
-  } catch (err) {
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Não foi possível registrar a troca."
-    );
-  } finally {
-    setBusy(false);
-  }
-}
   const activePatients = patients.filter(p =>
     !p.follow_up_closed_at &&
     !String(p.follow_up_status).toLowerCase().includes("closed") &&
@@ -476,31 +467,104 @@ export default function Home() {
             </form>
           </section>
         )}
-        {showForm && (
-          <section style={{ ...panelStyle, marginBottom: 18 }}>
-            <h3 style={{ marginTop: 0 }}>Cadastrar paciente</h3>
-            <form onSubmit={registerPatient} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 13 }}>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Nome completo
-                <input name="full_name" required maxLength={160} style={inputStyle} />
-              </label>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Leito
-                <input name="bed" required maxLength={30} style={inputStyle} />
-              </label>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Tipo de cateter
-                <select name="catheter_type" required defaultValue="" style={inputStyle}>
-                  <option value="" disabled>Selecione</option>
-                  {catheterTypes.map(type => <option key={type} value={type}>{type}</option>)}
-                </select>
-              </label>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Data de instalação/troca do conector (Dia 1)
-                <input name="start_date" type="date" required defaultValue={todayFortaleza()} style={inputStyle} />
-              </label>
-              <div style={{ display: "flex", gap: 8, alignItems: "end" }}>
-                <button disabled={busy} type="submit" style={primaryButton}>{busy ? "Salvando…" : "Salvar paciente"}</button>
-                <button type="button" onClick={() => setShowForm(false)} style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}>Cancelar</button>
+
+        {exchangePatient && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(15, 23, 42, 0.5)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 50,
+              padding: 20,
+            }}
+            onClick={() => setExchangePatient(null)}
+          >
+            <section
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                background: "#fff",
+                borderRadius: 16,
+                padding: 24,
+                border: "1px solid #e2e8f0",
+                boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1)",
+              }}
+              onClick={e => e.stopPropagation()}
+            >
+              <h3 style={{ marginTop: 0, marginBottom: 20 }}>Registrar troca do conector</h3>
+
+              <div style={{ display: "grid", gap: 16, marginBottom: 20 }}>
+                <div style={{ background: "#f8fafc", padding: 14, borderRadius: 10 }}>
+                  <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Paciente</div>
+                  <strong style={{ fontSize: 16 }}>{exchangePatient.full_name}</strong>
+                  <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>Leito {exchangePatient.bed} · {exchangePatient.catheter_type}</div>
+                </div>
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Profissional responsável *
+                  <input
+                    value={exchangeProfessional}
+                    onChange={e => setExchangeProfessional(e.target.value)}
+                    style={inputStyle}
+                    placeholder="Nome do profissional"
+                    required
+                  />
+                </label>
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Motivo da troca *
+                  <select
+                    value={exchangeReason}
+                    onChange={e => setExchangeReason(e.target.value)}
+                    style={inputStyle}
+                    required
+                  >
+                    <option value="Troca programada">Troca programada</option>
+                    <option value="Troca por obstrução">Troca por obstrução</option>
+                    <option value="Troca por infecção">Troca por infecção</option>
+                    <option value="Troca por vazamento">Troca por vazamento</option>
+                    <option value="Troca por mobilidade">Troca por mobilidade</option>
+                    <option value="Outros">Outros</option>
+                  </select>
+                </label>
+
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Observações
+                  <textarea
+                    value={exchangeNotes}
+                    onChange={e => setExchangeNotes(e.target.value)}
+                    rows={4}
+                    style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }}
+                    placeholder="Descreva detalhes da troca (opcional)"
+                  />
+                </label>
               </div>
-            </form>
-          </section>
+
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  onClick={() => setExchangePatient(null)}
+                  style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  type="button"
+                  disabled={busy || !exchangeProfessional.trim()}
+                  onClick={() => {
+                    void registerExchange(exchangePatient);
+                  }}
+                  style={{ ...primaryButton, opacity: (busy || !exchangeProfessional.trim()) ? 0.6 : 1 }}
+                >
+                  {busy ? "Registrando…" : "Confirmar troca"}
+                </button>
+              </div>
+            </section>
+          </div>
         )}
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 20 }}>
@@ -545,17 +609,17 @@ export default function Home() {
                     </div>
                     {cycle && (
                       <button
-  disabled={busy}
-  onClick={() => {
-    setExchangePatient(patient);
-    setExchangeReason("Troca programada");
-    setExchangeProfessional(staff?.full_name ?? "");
-    setExchangeNotes("");
-  }}
-  style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
->
-  <RefreshCw size={16} /> Registrar troca
-</button>
+                        disabled={busy}
+                        onClick={() => {
+                          setExchangePatient(patient);
+                          setExchangeReason("Troca programada");
+                          setExchangeProfessional(staff?.full_name ?? "");
+                          setExchangeNotes("");
+                        }}
+                        style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
+                      >
+                        <RefreshCw size={16} /> Registrar troca
+                      </button>
                     )}
                   </article>
                 ))}
