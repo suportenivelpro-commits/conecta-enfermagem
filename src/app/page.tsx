@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   Activity, CalendarClock, ClipboardList, LogOut,
-  Plus, RefreshCw, Search, ShieldCheck
+  Plus, RefreshCw, Search, ShieldCheck, X
 } from "lucide-react";
 import { getSupabase } from "@/lib/supabase";
 
@@ -89,6 +89,14 @@ const catheterTypes = [
   "Hickman",
 ];
 
+const exchangeReasons = [
+  "Troca programada",
+  "Sujidade",
+  "Obstrução",
+  "Danos ao conector",
+  "Outro motivo",
+];
+
 const priority: Record<string, number> = {
   late: 0, today: 1, soon: 2, ok: 3, future: 4,
 };
@@ -130,6 +138,30 @@ const primaryButton = {
   cursor: "pointer",
 } as const;
 
+const modalOverlay = {
+  position: "fixed" as const,
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  background: "rgba(0, 0, 0, 0.5)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  zIndex: 1000,
+  padding: 16,
+};
+
+const modalContent = {
+  background: "#fff",
+  borderRadius: 16,
+  padding: 24,
+  maxWidth: 500,
+  width: "100%",
+  maxHeight: "90vh",
+  overflowY: "auto" as const,
+};
+
 export default function Home() {
   const [staff, setStaff] = useState<Staff | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -145,9 +177,11 @@ export default function Home() {
   const [showForm, setShowForm] = useState(false);
   const [exchangePatient, setExchangePatient] = useState<Patient | null>(null);
   const [exchangeReason, setExchangeReason] = useState("Troca programada");
+  const [exchangeOtherReason, setExchangeOtherReason] = useState("");
   const [exchangeProfessional, setExchangeProfessional] = useState("");
   const [exchangeNotes, setExchangeNotes] = useState("");
   const [tab, setTab] = useState<"patients" | "history">("patients");
+  const [currentDay, setCurrentDay] = useState(todayFortaleza());
 
   async function loadData(sb: NonNullable<ReturnType<typeof getSupabase>>) {
     const [p, c, e] = await Promise.all([
@@ -207,6 +241,18 @@ export default function Home() {
     void init();
     return () => { mounted = false; };
   }, []);
+
+  // Atualização periódica dos indicadores de prazo
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const newDay = todayFortaleza();
+      if (newDay !== currentDay) {
+        setCurrentDay(newDay);
+      }
+    }, 60000); // A cada 1 minuto
+
+    return () => clearInterval(interval);
+  }, [currentDay]);
 
   async function signIn(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -289,66 +335,62 @@ export default function Home() {
     }
   }
 
-  async function registerExchange(patient: Patient) {
-  if (!staff) return;
+  async function registerExchange() {
+    if (!staff || !exchangePatient) return;
 
-  const sb = getSupabase();
-  if (!sb) return;
+    const sb = getSupabase();
+    if (!sb) return;
 
-  if (!exchangeProfessional.trim()) {
-    setError("Informe o profissional responsável.");
-    return;
-  }
+    if (!exchangeProfessional.trim()) {
+      setError("Informe o profissional responsável.");
+      return;
+    }
 
-  if (!exchangeReason.trim()) {
-    setError("Selecione o motivo da troca.");
-    return;
-  }
-
-  const confirmed = window.confirm(
-    "Confirmar a troca do conector de " +
-      patient.full_name +
-      ", leito " +
-      patient.bed +
-      "? O registro iniciará um novo ciclo e preservará o histórico."
-  );
-
-  if (!confirmed) return;
-
-  setBusy(true);
-  setError("");
-  setNotice("");
-
-  try {
-    const { error: rpcError } = await sb.rpc(
-      "register_connector_exchange",
-      {
-        p_patient_id: patient.id,
-        p_professional_name: exchangeProfessional.trim(),
-        p_notes: exchangeNotes.trim() || null,
-        p_reason: exchangeReason.trim(),
+    let finalReason = exchangeReason.trim();
+    if (finalReason === "Outro motivo") {
+      if (!exchangeOtherReason.trim()) {
+        setError("Informe a descrição do motivo da troca.");
+        return;
       }
-    );
+      finalReason = exchangeOtherReason.trim();
+    }
 
-    if (rpcError) throw rpcError;
+    setBusy(true);
+    setError("");
+    setNotice("");
 
-    setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
-    setExchangePatient(null);
-    setExchangeNotes("");
-    setExchangeReason("Troca programada");
-    setExchangeProfessional(staff.full_name);
+    try {
+      const { error: rpcError } = await sb.rpc(
+        "register_connector_exchange",
+        {
+          p_patient_id: exchangePatient.id,
+          p_professional_name: exchangeProfessional.trim(),
+          p_notes: exchangeNotes.trim() || null,
+          p_reason: finalReason,
+        }
+      );
 
-    await loadData(sb);
-  } catch (err) {
-    setError(
-      err instanceof Error
-        ? err.message
-        : "Não foi possível registrar a troca."
-    );
-  } finally {
-    setBusy(false);
+      if (rpcError) throw rpcError;
+
+      setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
+      setExchangePatient(null);
+      setExchangeNotes("");
+      setExchangeReason("Troca programada");
+      setExchangeOtherReason("");
+      setExchangeProfessional(staff.full_name);
+
+      await loadData(sb);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Não foi possível registrar a troca."
+      );
+    } finally {
+      setBusy(false);
+    }
   }
-}
+
   const activePatients = patients.filter(p =>
     !p.follow_up_closed_at &&
     !String(p.follow_up_status).toLowerCase().includes("closed") &&
@@ -439,7 +481,7 @@ export default function Home() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
           <div>
             <h2 style={{ margin: "4px 0 6px", fontSize: 25 }}>Acompanhamento</h2>
-            <p style={{ margin: 0, color: "#64748b", fontSize: 14 }}>Hoje: {dateLabel(todayFortaleza())} · Fuso de Fortaleza</p>
+            <p style={{ margin: 0, color: "#64748b", fontSize: 14 }}>Hoje: {dateLabel(currentDay)} · Fuso de Fortaleza</p>
           </div>
           <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
             <button onClick={refresh} style={{ ...primaryButton, background: "#fff", color: "#0369a1", border: "1px solid #bae6fd" }}><RefreshCw size={16} /> Atualizar</button>
@@ -450,32 +492,6 @@ export default function Home() {
         {error && <div role="alert" style={{ ...panelStyle, color: "#b91c1c", marginBottom: 14 }}>{error}</div>}
         {notice && <div role="status" style={{ ...panelStyle, color: "#166534", marginBottom: 14 }}>{notice}</div>}
 
-        {showForm && (
-          <section style={{ ...panelStyle, marginBottom: 18 }}>
-            <h3 style={{ marginTop: 0 }}>Cadastrar paciente</h3>
-            <form onSubmit={registerPatient} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 13 }}>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Nome completo
-                <input name="full_name" required maxLength={160} style={inputStyle} />
-              </label>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Leito
-                <input name="bed" required maxLength={30} style={inputStyle} />
-              </label>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Tipo de cateter
-                <select name="catheter_type" required defaultValue="" style={inputStyle}>
-                  <option value="" disabled>Selecione</option>
-                  {catheterTypes.map(type => <option key={type} value={type}>{type}</option>)}
-                </select>
-              </label>
-              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Data de instalação/troca do conector (Dia 1)
-                <input name="start_date" type="date" required defaultValue={todayFortaleza()} style={inputStyle} />
-              </label>
-              <div style={{ display: "flex", gap: 8, alignItems: "end" }}>
-                <button disabled={busy} type="submit" style={primaryButton}>{busy ? "Salvando…" : "Salvar paciente"}</button>
-                <button type="button" onClick={() => setShowForm(false)} style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}>Cancelar</button>
-              </div>
-            </form>
-          </section>
-        )}
         {showForm && (
           <section style={{ ...panelStyle, marginBottom: 18 }}>
             <h3 style={{ marginTop: 0 }}>Cadastrar paciente</h3>
@@ -545,17 +561,19 @@ export default function Home() {
                     </div>
                     {cycle && (
                       <button
-  disabled={busy}
-  onClick={() => {
-    setExchangePatient(patient);
-    setExchangeReason("Troca programada");
-    setExchangeProfessional(staff?.full_name ?? "");
-    setExchangeNotes("");
-  }}
-  style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
->
-  <RefreshCw size={16} /> Registrar troca
-</button>
+                        disabled={busy}
+                        onClick={() => {
+                          setExchangePatient(patient);
+                          setExchangeReason("Troca programada");
+                          setExchangeOtherReason("");
+                          setExchangeProfessional(staff?.full_name ?? "");
+                          setExchangeNotes("");
+                          setError("");
+                        }}
+                        style={{ ...primaryButton, marginTop: 14, opacity: busy ? 0.65 : 1 }}
+                      >
+                        <RefreshCw size={16} /> Registrar troca
+                      </button>
                     )}
                   </article>
                 ))}
@@ -590,6 +608,110 @@ export default function Home() {
           Ferramenta em validação técnica. Confirme os prazos e os registros conforme o protocolo institucional. Não utilize esta versão como única fonte para decisões clínicas.
         </p>
       </div>
+
+      {/* Modal de confirmação de troca do conector */}
+      {exchangePatient && (
+        <div style={modalOverlay}>
+          <div style={modalContent}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <h2 style={{ margin: 0, fontSize: 20 }}>Registrar troca do conector</h2>
+              <button
+                onClick={() => setExchangePatient(null)}
+                style={{ background: "none", border: "none", cursor: "pointer", padding: 0, color: "#64748b" }}
+                type="button"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div style={{ marginBottom: 16, padding: 12, background: "#f8fafc", borderRadius: 8 }}>
+              <div style={{ fontSize: 13, color: "#64748b", marginBottom: 4 }}>Paciente</div>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>{exchangePatient.full_name}</div>
+              <div style={{ fontSize: 13, color: "#64748b", marginTop: 6 }}>Leito {exchangePatient.bed}</div>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                registerExchange();
+              }}
+              style={{ display: "grid", gap: 13 }}
+            >
+              <label style={{ display: "grid", gap: 6, fontSize: 13, fontWeight: 600 }}>
+                Motivo da troca *
+                <select
+                  value={exchangeReason}
+                  onChange={(e) => setExchangeReason(e.target.value)}
+                  style={inputStyle}
+                  required
+                >
+                  {exchangeReasons.map(reason => (
+                    <option key={reason} value={reason}>{reason}</option>
+                  ))}
+                </select>
+              </label>
+
+              {exchangeReason === "Outro motivo" && (
+                <label style={{ display: "grid", gap: 6, fontSize: 13, fontWeight: 600 }}>
+                  Descrição do motivo *
+                  <input
+                    type="text"
+                    value={exchangeOtherReason}
+                    onChange={(e) => setExchangeOtherReason(e.target.value)}
+                    placeholder="Descreva o motivo da troca"
+                    style={inputStyle}
+                    maxLength={200}
+                  />
+                </label>
+              )}
+
+              <label style={{ display: "grid", gap: 6, fontSize: 13, fontWeight: 600 }}>
+                Profissional responsável *
+                <input
+                  type="text"
+                  value={exchangeProfessional}
+                  onChange={(e) => setExchangeProfessional(e.target.value)}
+                  placeholder="Nome do profissional"
+                  style={inputStyle}
+                  required
+                  maxLength={160}
+                />
+              </label>
+
+              <label style={{ display: "grid", gap: 6, fontSize: 13, fontWeight: 600 }}>
+                Observações (opcional)
+                <textarea
+                  value={exchangeNotes}
+                  onChange={(e) => setExchangeNotes(e.target.value)}
+                  placeholder="Informações adicionais sobre a troca"
+                  style={{ ...inputStyle, resize: "vertical", minHeight: 80, fontFamily: "Arial, Helvetica, sans-serif" }}
+                  maxLength={500}
+                />
+              </label>
+
+              {error && <p role="alert" style={{ color: "#b91c1c", fontSize: 13, overflowWrap: "anywhere", margin: 0 }}>{error}</p>}
+
+              <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                <button
+                  disabled={busy}
+                  type="submit"
+                  style={{ ...primaryButton, flex: 1, opacity: busy ? 0.7 : 1 }}
+                >
+                  {busy ? "Confirmando…" : "Confirmar troca"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setExchangePatient(null)}
+                  style={{ ...primaryButton, flex: 1, background: "#e2e8f0", color: "#334155" }}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
