@@ -14,6 +14,8 @@ type Staff = {
   active: boolean;
 };
 
+type Professional = { id: string; full_name: string; active: boolean };
+
 type Patient = {
   id: string;
   full_name: string;
@@ -259,6 +261,16 @@ const primaryButton = {
 export default function Home() {
   const [today, setToday] = useState(todayFortaleza);
   const [staff, setStaff] = useState<Staff | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [professionals, setProfessionals] = useState<Professional[]>([]);
+  const [showProfessionals, setShowProfessionals] = useState(false);
+  const [editingProfessional, setEditingProfessional] = useState<Professional | null>(null);
+  const [professionalName, setProfessionalName] = useState("");
+  const [professionalPassword, setProfessionalPassword] = useState("");
+  const [showProfessionalPassword, setShowProfessionalPassword] = useState(false);
+  const [professionalError, setProfessionalError] = useState("");
+  const [professionalNotice, setProfessionalNotice] = useState("");
+  const [exchangePassword, setExchangePassword] = useState("");
   const [patients, setPatients] = useState<Patient[]>([]);
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
@@ -314,18 +326,20 @@ export default function Home() {
   }, []);
 
   async function loadData(sb: NonNullable<ReturnType<typeof getSupabase>>) {
-    const [p, c, e] = await Promise.all([
+    const [p, c, e, professionalsResult] = await Promise.all([
       sb.from("patients").select("*").order("bed", { ascending: true }),
       sb.from("connector_cycles").select("*").order("start_date", { ascending: false }),
       sb.from("connector_events").select("*").order("created_at", { ascending: false }).limit(100),
+      sb.from("exchange_professionals").select("id,full_name,active").order("full_name"),
     ]);
 
-    const failed = [p, c, e].find(r => r.error);
+    const failed = [p, c, e, professionalsResult].find(r => r.error);
     if (failed?.error) throw new Error(failed.error.message);
 
     setPatients((p.data ?? []) as Patient[]);
     setCycles((c.data ?? []) as Cycle[]);
     setEvents((e.data ?? []) as EventRow[]);
+    setProfessionals((professionalsResult.data ?? []) as Professional[]);
   }
 
   async function loadProfileAndData(sb: NonNullable<ReturnType<typeof getSupabase>>, userId: string) {
@@ -342,6 +356,9 @@ export default function Home() {
     }
 
     setStaff(data as Staff);
+    const { data: admin, error: adminError } = await sb.rpc("is_professional_admin");
+    if (adminError) throw adminError;
+    setIsAdmin(admin === true);
     await loadData(sb);
   }
 
@@ -403,6 +420,12 @@ export default function Home() {
     const sb = getSupabase();
     if (sb) await sb.auth.signOut();
     setStaff(null);
+    setIsAdmin(false);
+    setShowProfessionals(false);
+    setProfessionals([]);
+    setProfessionalPassword("");
+    setShowProfessionalPassword(false);
+    setExchangePassword("");
     setPatients([]);
     setCycles([]);
     setEvents([]);
@@ -463,8 +486,12 @@ export default function Home() {
     const sb = getSupabase();
     if (!sb) return;
 
-    if (!exchangeProfessional.trim()) {
-      setError("Informe o profissional responsável.");
+    if (!professionals.some(professional => professional.id === exchangeProfessional && professional.active)) {
+      setError("Selecione um profissional ativo.");
+      return;
+    }
+    if (!exchangePassword) {
+      setError("Informe a senha do profissional.");
       return;
     }
 
@@ -485,19 +512,18 @@ export default function Home() {
     try {
       const exchange = {
           p_patient_id: patient.id,
-          p_professional_name: exchangeProfessional.trim(),
+          p_professional_id: exchangeProfessional,
+          p_password: exchangePassword,
+          p_kind: exchangeKind,
           p_notes: exchangeNotes.trim() || null,
           p_reason: exchangeReason.trim(),
+          p_catheter_type: exchangeKind === "catheter" ? exchangeCatheterType : null,
+          p_dressing_duration_days: exchangeKind !== "connector" ? Number(exchangeDressingDays) : null,
       };
-      const { error: rpcError } = exchangeKind === "catheter"
-        ? await sb.rpc("register_catheter_with_dressing", {
-            ...exchange, p_catheter_type: exchangeCatheterType, p_dressing_duration_days: Number(exchangeDressingDays),
-          })
-        : exchangeKind === "dressing"
-          ? await sb.rpc("register_dressing_exchange", { ...exchange, p_dressing_duration_days: Number(exchangeDressingDays) })
-          : await sb.rpc("register_connector_exchange", exchange);
+      const { data, error: rpcError } = await sb.rpc("confirm_professional_exchange", exchange);
 
       if (rpcError) throw rpcError;
+      if (data?.error) throw new Error(data.error);
 
       setNotice(exchangeKind === "catheter"
         ? "Troca do cateter registrada. Conector e curativo iniciam um novo Dia 1 hoje."
@@ -507,12 +533,51 @@ export default function Home() {
       setExchangePatient(null);
       setExchangeNotes("");
       setExchangeReason("Troca programada");
-      setExchangeProfessional(staff.full_name);
+      setExchangeProfessional("");
+      setExchangePassword("");
 
-      await loadData(sb);
+      try {
+        await loadData(sb);
+      } catch (reloadError) {
+        setError(`Troca registrada, mas não foi possível atualizar o painel. ${errorMessage(reloadError, "Clique em Atualizar.")}`);
+      }
     } catch (err) {
       setError(errorMessage(err, "Não foi possível registrar a troca."));
     } finally {
+      setExchangePassword("");
+      setBusy(false);
+    }
+  }
+
+  async function saveProfessional(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (busy || !isAdmin) return;
+    await manageProfessional(editingProfessional, professionalName, professionalPassword || null, editingProfessional?.active ?? true);
+  }
+
+  async function manageProfessional(professional: Professional | null, name: string, secret: string | null, active: boolean) {
+    if (busy || !isAdmin) return;
+    const sb = getSupabase();
+    if (!sb) return;
+    setBusy(true);
+    setProfessionalError("");
+    setProfessionalNotice("");
+    try {
+      const { error: rpcError } = await sb.rpc("manage_exchange_professional", {
+        p_full_name: name.trim(), p_password: secret, p_professional_id: professional?.id ?? null, p_active: active,
+      });
+      if (rpcError) throw rpcError;
+      setProfessionalPassword("");
+      setShowProfessionalPassword(false);
+      setProfessionalName("");
+      setEditingProfessional(null);
+      setProfessionalNotice("Profissional salvo com sucesso.");
+      try { await loadData(sb); }
+      catch (reloadError) { setProfessionalError(`Cadastro salvo. ${errorMessage(reloadError, "Atualize o painel.")}`); }
+    } catch (err) {
+      setProfessionalError(errorMessage(err, "Não foi possível salvar o profissional."));
+    } finally {
+      setProfessionalPassword("");
       setBusy(false);
     }
   }
@@ -639,6 +704,10 @@ export default function Home() {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <span style={{ fontSize: 13, color: "#475569" }}>{staff.full_name} · {staff.role}</span>
+            {isAdmin && <button disabled={busy} onClick={() => {
+              setShowProfessionals(true); setProfessionalError(""); setProfessionalNotice("");
+              setEditingProfessional(null); setProfessionalName(""); setProfessionalPassword(""); setShowProfessionalPassword(false);
+            }} style={primaryButton}><ShieldCheck size={16} /> Profissionais</button>}
             <button onClick={signOut} style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}><LogOut size={16} /> Sair</button>
           </div>
         </div>
@@ -670,6 +739,60 @@ export default function Home() {
 
         {error && <div role="alert" style={{ ...panelStyle, color: "#b91c1c", marginBottom: 14 }}>{error}</div>}
         {notice && <div role="status" style={{ ...panelStyle, color: "#166534", marginBottom: 14 }}>{notice}</div>}
+
+        {showProfessionals && isAdmin && (
+          <section aria-label="Gerenciar profissionais" style={{ ...panelStyle, marginBottom: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <h3>Profissionais autorizados</h3>
+              <button disabled={busy} style={primaryButton} onClick={() => {
+                setShowProfessionals(false); setProfessionalPassword(""); setShowProfessionalPassword(false);
+              }}>Fechar painel</button>
+            </div>
+            <p style={{ color: "#475569", fontSize: 14 }}>Cadastre o nome e a senha que o profissional usará para confirmar as trocas. Essas credenciais não dão acesso ao sistema.</p>
+            {professionalError && <p role="alert" style={{ color: "#b91c1c" }}>{professionalError}</p>}
+            {professionalNotice && <p role="status" style={{ color: "#166534" }}>{professionalNotice}</p>}
+            <form onSubmit={saveProfessional} style={{ display: "grid", gap: 12, maxWidth: 500 }}>
+              <label>Nome do profissional
+                <input required minLength={2} maxLength={120} disabled={busy} value={professionalName}
+                  onChange={e => setProfessionalName(e.target.value)} style={inputStyle} />
+              </label>
+              <label>{editingProfessional ? "Nova senha (deixe em branco para manter)" : "Senha de confirmação"}
+                <input type={showProfessionalPassword ? "text" : "password"} autoComplete="new-password" minLength={8} maxLength={72}
+                  required={!editingProfessional} disabled={busy} value={professionalPassword}
+                  onChange={e => setProfessionalPassword(e.target.value)} style={inputStyle} />
+              </label>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <button disabled={busy} type="button" style={primaryButton} onClick={() => {
+                  setProfessionalPassword(crypto.randomUUID().replaceAll("-", "").slice(0, 16) + "aA1!");
+                  setShowProfessionalPassword(true);
+                }}>Gerar senha</button>
+                <label><input type="checkbox" checked={showProfessionalPassword} disabled={busy}
+                  onChange={e => setShowProfessionalPassword(e.target.checked)} /> Mostrar senha</label>
+              </div>
+              <span style={{ color: "#64748b", fontSize: 12 }}>Mínimo de 8 caracteres. A senha não poderá ser consultada depois; poderá ser redefinida.</span>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button disabled={busy} type="submit" style={primaryButton}>{busy ? "Salvando…" : editingProfessional ? "Salvar alterações" : "Cadastrar profissional"}</button>
+                {editingProfessional && <button disabled={busy} type="button" style={primaryButton} onClick={() => {
+                  setEditingProfessional(null); setProfessionalName(""); setProfessionalPassword(""); setShowProfessionalPassword(false);
+                }}>Cancelar edição</button>}
+              </div>
+            </form>
+            <div style={{ marginTop: 20, display: "grid", gap: 10 }}>
+              {professionals.length === 0 && <p>Nenhum profissional cadastrado. Cadastre os responsáveis antes de registrar uma troca.</p>}
+              {professionals.map(professional => <div key={professional.id} style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", padding: 10, borderTop: "1px solid #e2e8f0" }}>
+                <strong style={{ flex: 1 }}>{professional.full_name}</strong>
+                <span>{professional.active ? "Ativo" : "Inativo"}</span>
+                <button disabled={busy} style={primaryButton} onClick={() => {
+                  setEditingProfessional(professional); setProfessionalName(professional.full_name);
+                  setProfessionalPassword(""); setShowProfessionalPassword(false); setProfessionalError(""); setProfessionalNotice("");
+                }}>Editar / redefinir senha</button>
+                <button disabled={busy} style={{ ...primaryButton, background: "#475569" }} onClick={() =>
+                  manageProfessional(professional, professional.full_name, null, !professional.active)
+                }>{professional.active ? "Desativar" : "Reativar"}</button>
+              </div>)}
+            </div>
+          </section>
+        )}
 
         {showDischarge && (
           <div
@@ -757,7 +880,7 @@ export default function Home() {
               zIndex: 50,
               padding: 20,
             }}
-            onClick={() => { if (!busy) setExchangePatient(null); }}
+            onClick={() => { if (!busy) { setExchangePatient(null); setExchangePassword(""); } }}
           >
             <section
               role="dialog"
@@ -833,13 +956,23 @@ export default function Home() {
 
                 <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
                   Profissional responsável *
-                  <input
+                  <select
                     value={exchangeProfessional}
-                    onChange={e => setExchangeProfessional(e.target.value)}
+                    onChange={e => { setExchangeProfessional(e.target.value); setExchangePassword(""); }}
                     style={inputStyle}
-                    placeholder="Nome do profissional"
                     required
-                  />
+                  >
+                    <option value="" disabled>Selecione o profissional</option>
+                    {professionals.filter(professional => professional.active).map(professional =>
+                      <option key={professional.id} value={professional.id}>{professional.full_name}</option>
+                    )}
+                  </select>
+                </label>
+                {!professionals.some(professional => professional.active) && <p role="alert">Solicite à administradora o cadastro de um profissional.</p>}
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Senha do profissional *
+                  <input type="password" required autoComplete="off" maxLength={72} value={exchangePassword}
+                    onChange={e => setExchangePassword(e.target.value)} style={inputStyle} />
                 </label>
 
                 <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
@@ -884,7 +1017,7 @@ export default function Home() {
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => setExchangePatient(null)}
+                  onClick={() => { setExchangePatient(null); setExchangePassword(""); }}
                   style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}
                 >
                   Cancelar
@@ -1151,7 +1284,8 @@ export default function Home() {
                                         setExchangeKind("connector");
                                         setExchangePatient(patient);
                                         setExchangeReason("Troca programada");
-                                        setExchangeProfessional(staff?.full_name ?? "");
+                                        setExchangeProfessional("");
+                                        setExchangePassword("");
                                         setExchangeNotes("");
                                       }}
                                       style={{
@@ -1178,7 +1312,8 @@ export default function Home() {
                                       setExchangeCatheterType(patient.catheter_type);
                                       setExchangeDressingDays(patient.dressing_duration_days ? String(patient.dressing_duration_days) : "");
                                       setExchangeReason("");
-                                      setExchangeProfessional(staff.full_name);
+                                      setExchangeProfessional("");
+                                      setExchangePassword("");
                                       setExchangeNotes("");
                                     }}
                                     style={{
@@ -1202,7 +1337,8 @@ export default function Home() {
                                       setExchangePatient(patient);
                                       setExchangeDressingDays(patient.dressing_duration_days ? String(patient.dressing_duration_days) : "");
                                       setExchangeReason("Troca programada");
-                                      setExchangeProfessional(staff.full_name);
+                                      setExchangeProfessional("");
+                                      setExchangePassword("");
                                       setExchangeNotes("");
                                     }}
                                     style={{ ...primaryButton, gap: 4, padding: "6px 4px", fontSize: 10, background: "#f8fafc", color: "#475569", border: "1px solid #cbd5e1", opacity: busy ? 0.6 : 1 }}

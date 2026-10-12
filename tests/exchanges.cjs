@@ -19,7 +19,10 @@ function setup(overrides = {}, rpcError = null) {
     exchangeKind: "connector",
     exchangeCatheterType: "Permcath",
     exchangeDressingDays: "3",
-    exchangeProfessional: " Profissional de teste ",
+    exchangeProfessional: "professional-test",
+    professionals: [{ id: "professional-test", full_name: "Profissional de teste", active: true }],
+    exchangePassword: "senha-teste",
+    isAdmin: true,
     exchangeReason: " Troca por obstrução ",
     exchangeNotes: " Observação ",
     dischargePatientId: "patient-test",
@@ -33,29 +36,39 @@ function setup(overrides = {}, rpcError = null) {
     setExchangeNotes: () => {},
     setExchangeReason: () => {},
     setExchangeProfessional: () => {},
+    setExchangePassword: value => { result.exchangePassword = value; },
+    setProfessionalError: value => { result.professionalError = value; },
+    setProfessionalNotice: value => { result.professionalNotice = value; },
+    setProfessionalPassword: value => { result.professionalPassword = value; },
+    setShowProfessionalPassword: () => {},
+    setProfessionalName: () => {},
+    setEditingProfessional: () => {},
     setDischargeError: value => { result.dischargeError = value; },
     setShowDischarge: value => { result.showDischarge = value; },
     setDischargePatientId: value => { result.dischargePatientId = value; },
     ...overrides,
   });
-  vm.runInContext(ts.transpile(["errorMessage", "registerExchange", "registerDischarge"].map(name => findFunction(name)).join("\n")), context);
+  vm.runInContext(ts.transpile(["errorMessage", "registerExchange", "registerDischarge", "manageProfessional"].map(name => findFunction(name)).join("\n")), context);
   return { context, calls, result };
 }
 
 (async () => {
   const connector = setup();
   await connector.context.registerExchange({ id: "patient-test" });
-  assert.equal(connector.calls[0].name, "register_connector_exchange");
-  assert.equal(connector.calls[0].args.p_professional_name, "Profissional de teste");
+  assert.equal(connector.calls[0].name, "confirm_professional_exchange");
+  assert.equal(connector.calls[0].args.p_professional_id, "professional-test");
+  assert.equal(connector.calls[0].args.p_password, "senha-teste");
+  assert.equal(connector.calls[0].args.p_kind, "connector");
   assert.equal(connector.calls[0].args.p_reason, "Troca por obstrução");
   assert.equal(connector.calls[0].args.p_notes, "Observação");
-  assert.equal("p_catheter_type" in connector.calls[0].args, false);
+  assert.equal(connector.calls[0].args.p_catheter_type, null);
   assert.equal(connector.result.reloaded, true);
   assert.equal(connector.result.modal, null);
 
   const catheter = setup({ exchangeKind: "catheter" });
   await catheter.context.registerExchange({ id: "patient-test" });
-  assert.equal(catheter.calls[0].name, "register_catheter_with_dressing");
+  assert.equal(catheter.calls[0].name, "confirm_professional_exchange");
+  assert.equal(catheter.calls[0].args.p_kind, "catheter");
   assert.equal(catheter.calls[0].args.p_catheter_type, "Permcath");
   assert.equal(catheter.calls[0].args.p_dressing_duration_days, 3);
   assert.match(catheter.result.notice, /novo Dia 1/);
@@ -63,9 +76,10 @@ function setup(overrides = {}, rpcError = null) {
 
   const dressing = setup({ exchangeKind: "dressing", exchangeDressingDays: "7" });
   await dressing.context.registerExchange({ id: "patient-test" });
-  assert.equal(dressing.calls[0].name, "register_dressing_exchange");
+  assert.equal(dressing.calls[0].name, "confirm_professional_exchange");
+  assert.equal(dressing.calls[0].args.p_kind, "dressing");
   assert.equal(dressing.calls[0].args.p_dressing_duration_days, 7);
-  assert.equal("p_catheter_type" in dressing.calls[0].args, false);
+  assert.equal(dressing.calls[0].args.p_catheter_type, null);
   assert.equal(dressing.result.reloaded, true);
 
   const noDressing = setup({ exchangeKind: "catheter", exchangeDressingDays: "" });
@@ -88,6 +102,39 @@ function setup(overrides = {}, rpcError = null) {
   const busy = setup({ busy: true });
   await busy.context.registerExchange({ id: "patient-test" });
   assert.equal(busy.calls.length, 0);
+
+  const noPassword = setup({ exchangePassword: "" });
+  await noPassword.context.registerExchange({ id: "patient-test" });
+  assert.equal(noPassword.calls.length, 0);
+  assert.match(noPassword.result.error, /senha/);
+
+  const inactiveProfessional = setup({ professionals: [] });
+  await inactiveProfessional.context.registerExchange({ id: "patient-test" });
+  assert.equal(inactiveProfessional.calls.length, 0);
+  assert.match(inactiveProfessional.result.error, /profissional ativo/);
+
+  const wrongPassword = setup({ getSupabase: () => ({ rpc: async () => ({ data: { error: "Senha incorreta." }, error: null }) }) });
+  await wrongPassword.context.registerExchange({ id: "patient-test" });
+  assert.equal(wrongPassword.result.error, "Senha incorreta.");
+  assert.equal(wrongPassword.result.modal, undefined);
+  assert.equal(wrongPassword.result.exchangePassword, "");
+
+  const nonAdmin = setup({ isAdmin: false });
+  await nonAdmin.context.manageProfessional(null, "Profissional", "senha-teste", true);
+  assert.equal(nonAdmin.calls.length, 0);
+
+  const createProfessional = setup();
+  await createProfessional.context.manageProfessional(null, " Profissional ", "senha-teste", true);
+  assert.equal(createProfessional.calls[0].name, "manage_exchange_professional");
+  assert.equal(createProfessional.calls[0].args.p_full_name, "Profissional");
+  assert.equal(createProfessional.calls[0].args.p_password, "senha-teste");
+  assert.equal(createProfessional.result.professionalPassword, "");
+  assert.equal(createProfessional.result.reloaded, true);
+
+  const deactivate = setup();
+  await deactivate.context.manageProfessional({ id: "professional-test" }, "Profissional", null, false);
+  assert.equal(deactivate.calls[0].args.p_active, false);
+  assert.equal(deactivate.calls[0].args.p_password, null);
 
   const discharge = setup();
   await discharge.context.registerDischarge({ preventDefault() {} });
