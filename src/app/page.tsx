@@ -19,6 +19,10 @@ type Patient = {
   full_name: string;
   bed: string;
   catheter_type: string;
+  catheter_installed_date: string | null;
+  dressing_applied_date: string | null;
+  dressing_duration_days: number | null;
+  dressing_due_date: string | null;
   follow_up_status: string;
   follow_up_closed_at: string | null;
 };
@@ -40,6 +44,19 @@ type EventRow = {
   professional_name: string;
   reason: string | null;
   notes: string | null;
+  details: {
+    notes?: string | null;
+    previous_catheter_installed_date?: string | null;
+    new_catheter_installed_date?: string;
+    previous_catheter_type?: string;
+    new_catheter_type?: string;
+    new_dressing_applied_date?: string;
+    new_dressing_duration_days?: number;
+    new_dressing_due_date?: string;
+    dressing_applied_date?: string;
+    dressing_duration_days?: number;
+    dressing_due_date?: string;
+  } | null;
 };
 
 function todayFortaleza() {
@@ -86,14 +103,52 @@ function dateLabel(date: unknown) {
   return d && m && y ? `${d}/${m}/${y}` : "—";
 }
 
-function cycleStatus(start: string) {
-  const diff = dayNumber(todayFortaleza()) - dayNumber(start);
+function catheterAgeLabel(installedDate: string | null, today: string) {
+  if (!installedDate) return "Não informado";
+  const elapsed = dayNumber(today) - dayNumber(installedDate);
+  if (!Number.isFinite(elapsed)) return "Não informado";
+  if (elapsed < 0) return "Instalação futura";
+  const days = elapsed + 1;
+  return `${days} ${days === 1 ? "dia" : "dias"}`;
+}
+
+function cycleStatus(start: string, today: string) {
+  const diff = dayNumber(today) - dayNumber(start);
   if (diff < 0) return { label: "Data futura", color: "#64748b", key: "future" };
   if (diff <= 1) return { label: "No prazo", color: "#15803d", key: "ok" };
   if (diff === 2) return { label: "Troca amanhã", color: "#0284c7", key: "soon" };
   if (diff === 3) return { label: "Trocar hoje", color: "#ea580c", key: "today" };
   return { label: "Prazo ultrapassado", color: "#dc2626", key: "late" };
 }
+
+function dressingStatus(applied: string | null, duration: number | null, today: string) {
+  if (!applied || !duration || ![1, 3, 7].includes(duration)) {
+    return { label: "Curativo não informado", key: "unknown", color: "#64748b", bg: "#f8fafc", due: null, day: null };
+  }
+  const diff = dayNumber(today) - dayNumber(applied);
+  const due = addDays(applied, duration - 1);
+  const remaining = duration - 1 - diff;
+  if (diff < 0) return { label: "Data futura", key: "future", color: "#64748b", bg: "#f8fafc", due, day: null };
+  if (remaining < 0) return { label: `Vencido há ${-remaining} ${remaining === -1 ? "dia" : "dias"}`, key: "late", color: "#b91c1c", bg: "#fef2f2", due, day: diff + 1 };
+  if (duration === 1 && diff === 0) return { label: "No prazo · válido até hoje", key: "ok", color: "#15803d", bg: "#f0fdf4", due, day: 1 };
+  if (remaining === 0) return { label: "Trocar hoje", key: "today", color: "#c2410c", bg: "#fff7ed", due, day: diff + 1 };
+  if (remaining === 1) return { label: "Trocar amanhã", key: "soon", color: "#0369a1", bg: "#f0f9ff", due, day: diff + 1 };
+  return { label: "No prazo", key: "ok", color: "#15803d", bg: "#f0fdf4", due, day: diff + 1 };
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error && typeof error === "object" && "message" in error && typeof error.message === "string"
+    ? error.message : fallback;
+}
+
+const eventLabels: Record<string, string> = {
+  registration: "Cadastro inicial",
+  connector_exchange: "Troca do conector",
+  catheter_exchange: "Troca do cateter",
+  dressing_exchange: "Troca do curativo",
+  date_correction: "Correção de data",
+  follow_up_closed: "Acompanhamento encerrado",
+};
 
 type KanbanColumn = {
   key: string;
@@ -202,6 +257,7 @@ const primaryButton = {
 } as const;
 
 export default function Home() {
+  const [today, setToday] = useState(todayFortaleza);
   const [staff, setStaff] = useState<Staff | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [cycles, setCycles] = useState<Cycle[]>([]);
@@ -214,11 +270,48 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [showDischarge, setShowDischarge] = useState(false);
+  const [dischargePatientId, setDischargePatientId] = useState("");
+  const [dischargeError, setDischargeError] = useState("");
   const [exchangePatient, setExchangePatient] = useState<Patient | null>(null);
+  const [exchangeKind, setExchangeKind] = useState<"connector" | "catheter" | "dressing">("connector");
+  const [exchangeCatheterType, setExchangeCatheterType] = useState("");
+  const [exchangeDressingDays, setExchangeDressingDays] = useState("");
   const [exchangeReason, setExchangeReason] = useState("Troca programada");
   const [exchangeProfessional, setExchangeProfessional] = useState("");
   const [exchangeNotes, setExchangeNotes] = useState("");
   const [tab, setTab] = useState<"patients" | "history">("patients");
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+
+    function syncDate() {
+      clearTimeout(timer);
+      const currentDay = todayFortaleza();
+      setToday(currentDay);
+
+      // Fortaleza uses UTC-03:00. Recalculate after its next midnight,
+      // with a short margin so the callback cannot read the previous day.
+      const nextMidnight = new Date(`${addDays(currentDay, 1)}T00:00:00-03:00`);
+      timer = setTimeout(syncDate, Math.max(100, nextMidnight.getTime() - Date.now() + 100));
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") syncDate();
+    }
+
+    syncDate();
+    window.addEventListener("focus", syncDate);
+    window.addEventListener("pageshow", syncDate);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", syncDate);
+      window.removeEventListener("pageshow", syncDate);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
   async function loadData(sb: NonNullable<ReturnType<typeof getSupabase>>) {
     const [p, c, e] = await Promise.all([
@@ -340,12 +433,15 @@ export default function Home() {
     setNotice("");
 
     try {
-      const { error: rpcError } = await sb.rpc("register_patient", {
+      const { error: rpcError } = await sb.rpc("register_patient_with_dressing", {
         p_full_name: String(form.get("full_name") ?? "").trim(),
         p_bed: String(form.get("bed") ?? "").trim(),
         p_catheter_type: String(form.get("catheter_type") ?? ""),
         p_start_date: String(form.get("start_date") ?? todayFortaleza()),
         p_professional_name: staff.full_name,
+        p_catheter_installed_date: String(form.get("catheter_installed_date") ?? ""),
+        p_dressing_applied_date: String(form.get("dressing_applied_date") ?? ""),
+        p_dressing_duration_days: Number(form.get("dressing_duration_days")),
       });
 
       if (rpcError) throw rpcError;
@@ -354,13 +450,14 @@ export default function Home() {
       setNotice("Paciente cadastrado.");
       await loadData(sb);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Não foi possível cadastrar. Confira as permissões e a função do banco.");
+      setError(errorMessage(err, "Não foi possível cadastrar. Confira as permissões e a função do banco."));
     } finally {
       setBusy(false);
     }
   }
 
   async function registerExchange(patient: Patient) {
+    if (busy) return;
     if (!staff) return;
 
     const sb = getSupabase();
@@ -376,24 +473,37 @@ export default function Home() {
       return;
     }
 
+    if (exchangeKind !== "connector" && ![1, 3, 7].includes(Number(exchangeDressingDays))) {
+      setError("Selecione um curativo de 1, 3 ou 7 dias.");
+      return;
+    }
+
     setBusy(true);
     setError("");
     setNotice("");
 
     try {
-      const { error: rpcError } = await sb.rpc(
-        "register_connector_exchange",
-        {
+      const exchange = {
           p_patient_id: patient.id,
           p_professional_name: exchangeProfessional.trim(),
           p_notes: exchangeNotes.trim() || null,
           p_reason: exchangeReason.trim(),
-        }
-      );
+      };
+      const { error: rpcError } = exchangeKind === "catheter"
+        ? await sb.rpc("register_catheter_with_dressing", {
+            ...exchange, p_catheter_type: exchangeCatheterType, p_dressing_duration_days: Number(exchangeDressingDays),
+          })
+        : exchangeKind === "dressing"
+          ? await sb.rpc("register_dressing_exchange", { ...exchange, p_dressing_duration_days: Number(exchangeDressingDays) })
+          : await sb.rpc("register_connector_exchange", exchange);
 
       if (rpcError) throw rpcError;
 
-      setNotice("Troca registrada. Confira a data e o novo ciclo no painel.");
+      setNotice(exchangeKind === "catheter"
+        ? "Troca do cateter registrada. Conector e curativo iniciam um novo Dia 1 hoje."
+        : exchangeKind === "dressing"
+          ? "Troca do curativo registrada. Confira o novo prazo no cartão."
+          : "Troca registrada. Confira a data e o novo ciclo no painel.");
       setExchangePatient(null);
       setExchangeNotes("");
       setExchangeReason("Troca programada");
@@ -401,11 +511,46 @@ export default function Home() {
 
       await loadData(sb);
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Não foi possível registrar a troca."
-      );
+      setError(errorMessage(err, "Não foi possível registrar a troca."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function registerDischarge(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (busy || !staff) return;
+    if (!activePatients.some(patient => patient.id === dischargePatientId)) {
+      setDischargeError("Selecione um paciente em acompanhamento.");
+      return;
+    }
+    const sb = getSupabase();
+    if (!sb) {
+      setDischargeError("Supabase não configurado neste ambiente.");
+      return;
+    }
+
+    setBusy(true);
+    setDischargeError("");
+    setError("");
+    setNotice("");
+    try {
+      const { error: rpcError } = await sb.rpc("close_connector_follow_up", {
+        p_patient_id: dischargePatientId,
+        p_professional_name: staff.full_name,
+        p_reason: "Alta hospitalar",
+      });
+      if (rpcError) throw rpcError;
+      setShowDischarge(false);
+      setDischargePatientId("");
+      setNotice("Alta registrada. O paciente saiu do Kanban e o registro está no histórico.");
+      try {
+        await loadData(sb);
+      } catch (err) {
+        setError("Alta registrada. Não foi possível atualizar o painel: " + errorMessage(err, "Clique em Atualizar para tentar novamente."));
+      }
+    } catch (err) {
+      setDischargeError(errorMessage(err, "Não foi possível registrar a alta."));
     } finally {
       setBusy(false);
     }
@@ -420,10 +565,11 @@ export default function Home() {
   const cards = activePatients.map(patient => {
     const cycle = cycles.find(c => c.patient_id === patient.id && !c.closed_at) ??
       cycles.find(c => c.patient_id === patient.id);
-    const status = cycle ? cycleStatus(cycle.start_date) : {
+    const status = cycle ? cycleStatus(cycle.start_date, today) : {
       label: "Sem ciclo", color: "#64748b", key: "future",
     };
-    return { patient, cycle, status };
+    const dressing = dressingStatus(patient.dressing_applied_date, patient.dressing_duration_days, today);
+    return { patient, cycle, status, dressing };
   }).filter(item =>
     (item.patient.full_name + " " + item.patient.bed + " " + item.patient.catheter_type)
       .toLowerCase().includes(query.toLowerCase())
@@ -502,16 +648,63 @@ export default function Home() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
           <div>
             <h2 style={{ margin: "4px 0 6px", fontSize: 25 }}>Acompanhamento</h2>
-            <p style={{ margin: 0, color: "#64748b", fontSize: 14 }}>Hoje: {dateLabel(todayFortaleza())} · Fuso de Fortaleza</p>
+            <p style={{ margin: 0, color: "#64748b", fontSize: 14 }}>Hoje: {dateLabel(today)} · Fuso de Fortaleza</p>
           </div>
           <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
             <button onClick={refresh} style={{ ...primaryButton, background: "#fff", color: "#0369a1", border: "1px solid #bae6fd" }}><RefreshCw size={16} /> Atualizar</button>
-            <button onClick={() => setShowForm(v => !v)} style={primaryButton}><Plus size={17} /> Novo paciente</button>
+            <button disabled={busy} onClick={() => setShowForm(v => !v)} style={primaryButton}><Plus size={17} /> Novo paciente</button>
+            <button
+              disabled={busy || activePatients.length === 0}
+              onClick={() => {
+                setDischargePatientId("");
+                setDischargeError("");
+                setShowDischarge(true);
+                setShowForm(false);
+              }}
+              style={{ ...primaryButton, background: "#fff", color: "#475569", border: "1px solid #cbd5e1", opacity: busy || activePatients.length === 0 ? 0.6 : 1 }}
+            >
+              <LogOut size={17} /> Alta
+            </button>
           </div>
         </div>
 
         {error && <div role="alert" style={{ ...panelStyle, color: "#b91c1c", marginBottom: 14 }}>{error}</div>}
         {notice && <div role="status" style={{ ...panelStyle, color: "#166534", marginBottom: 14 }}>{notice}</div>}
+
+        {showDischarge && (
+          <div
+            style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20 }}
+            onClick={() => { if (!busy) setShowDischarge(false); }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="discharge-dialog-title"
+              style={{ ...panelStyle, width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto", padding: 24 }}
+              onClick={e => e.stopPropagation()}
+              onKeyDown={e => { if (e.key === "Escape" && !busy) setShowDischarge(false); }}
+            >
+              <h3 id="discharge-dialog-title" style={{ marginTop: 0 }}>Registrar alta</h3>
+              <form onSubmit={registerDischarge} style={{ display: "grid", gap: 16 }}>
+                <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                  Paciente *
+                  <select autoFocus required disabled={busy} value={dischargePatientId} onChange={e => { setDischargePatientId(e.target.value); setDischargeError(""); }} style={inputStyle}>
+                    <option value="" disabled>Selecione o paciente</option>
+                    {activePatients.map(patient => <option key={patient.id} value={patient.id}>{patient.full_name} · Leito {patient.bed}</option>)}
+                  </select>
+                </label>
+                <p style={{ margin: 0, color: "#475569", fontSize: 13, lineHeight: 1.6 }}>
+                  Ao confirmar, o paciente será retirado do Kanban. A alta será registrada no histórico em nome de <strong>{staff.full_name}</strong>, com os registros anteriores preservados.
+                </p>
+                {dischargeError && <p role="alert" style={{ margin: 0, color: "#b91c1c", background: "#fef2f2", padding: 12, borderRadius: 9, overflowWrap: "anywhere" }}>{dischargeError}</p>}
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button type="button" disabled={busy} onClick={() => setShowDischarge(false)} style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}>Cancelar</button>
+                  <button type="submit" disabled={busy || !dischargePatientId} style={{ ...primaryButton, opacity: busy || !dischargePatientId ? 0.6 : 1 }}>{busy ? "Registrando…" : "Confirmar alta"}</button>
+                </div>
+              </form>
+            </section>
+          </div>
+        )}
 
         {showForm && (
           <section style={{ ...panelStyle, marginBottom: 18 }}>
@@ -529,8 +722,20 @@ export default function Home() {
                   {catheterTypes.map(type => <option key={type} value={type}>{type}</option>)}
                 </select>
               </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Data de instalação do cateter
+                <input name="catheter_installed_date" type="date" required max={today} defaultValue={today} style={inputStyle} />
+              </label>
               <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Data de instalação/troca do conector (Dia 1)
-                <input name="start_date" type="date" required defaultValue={todayFortaleza()} style={inputStyle} />
+                <input name="start_date" type="date" required max={today} defaultValue={today} style={inputStyle} />
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Curativo (validade)
+                <select name="dressing_duration_days" required defaultValue="" style={inputStyle}>
+                  <option value="" disabled>Selecione</option>
+                  {[1, 3, 7].map(days => <option key={days} value={days}>{days} {days === 1 ? "dia" : "dias"}</option>)}
+                </select>
+              </label>
+              <label style={{ display: "grid", gap: 6, fontSize: 13 }}>Data de aplicação do curativo (Dia 1)
+                <input name="dressing_applied_date" type="date" required max={today} defaultValue={today} style={inputStyle} />
               </label>
               <div style={{ display: "flex", gap: 8, alignItems: "end" }}>
                 <button disabled={busy} type="submit" style={primaryButton}>{busy ? "Salvando…" : "Salvar paciente"}</button>
@@ -552,12 +757,17 @@ export default function Home() {
               zIndex: 50,
               padding: 20,
             }}
-            onClick={() => setExchangePatient(null)}
+            onClick={() => { if (!busy) setExchangePatient(null); }}
           >
             <section
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="exchange-dialog-title"
               style={{
                 width: "100%",
                 maxWidth: 520,
+                maxHeight: "90vh",
+                overflowY: "auto",
                 background: "#fff",
                 borderRadius: 16,
                 padding: 24,
@@ -566,7 +776,9 @@ export default function Home() {
               }}
               onClick={e => e.stopPropagation()}
             >
-              <h3 style={{ marginTop: 0, marginBottom: 20 }}>Registrar troca do conector</h3>
+              <h3 id="exchange-dialog-title" style={{ marginTop: 0, marginBottom: 20 }}>
+                {exchangeKind === "catheter" ? "Registrar troca do cateter" : exchangeKind === "dressing" ? "Registrar troca do curativo" : "Registrar troca do conector"}
+              </h3>
 
               <div style={{ display: "grid", gap: 16, marginBottom: 20 }}>
                 <div style={{ background: "#f8fafc", padding: 14, borderRadius: 10 }}>
@@ -574,6 +786,50 @@ export default function Home() {
                   <strong style={{ fontSize: 16 }}>{exchangePatient.full_name}</strong>
                   <div style={{ color: "#64748b", fontSize: 13, marginTop: 4 }}>Leito {exchangePatient.bed} · {exchangePatient.catheter_type}</div>
                 </div>
+
+                {exchangeKind === "catheter" && (
+                  <>
+                    <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#475569" }}>
+                      Registro em {dateLabel(today)}. O cateter não tem troca automática por prazo.
+                      Ao confirmar, conector e curativo também serão trocados e iniciarão um novo Dia 1.
+                    </p>
+                    <div style={{ fontSize: 13, color: "#475569" }}>
+                      Cateter atual instalado em: <strong>{exchangePatient.catheter_installed_date ? dateLabel(exchangePatient.catheter_installed_date) : "Não informada"}</strong>
+                      <div style={{ marginTop: 4 }}>
+                        Dias do cateter: <strong>{catheterAgeLabel(exchangePatient.catheter_installed_date, today)}</strong> (instalação = Dia 1).
+                      </div>
+                    </div>
+                    <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                      Tipo do novo cateter *
+                      <select value={exchangeCatheterType} onChange={e => setExchangeCatheterType(e.target.value)} required style={inputStyle}>
+                        {catheterTypes.map(type => <option key={type} value={type}>{type}</option>)}
+                      </select>
+                    </label>
+                  </>
+                )}
+
+                {exchangeKind !== "connector" && (
+                  <>
+                    {exchangeKind === "dressing" && (
+                      <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "#475569" }}>
+                        Aplicação em {dateLabel(today)} (Dia 1). A troca do curativo mantém as datas do cateter e do conector.
+                      </p>
+                    )}
+                    <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
+                      Validade do novo curativo *
+                      <select value={exchangeDressingDays} onChange={e => setExchangeDressingDays(e.target.value)} required style={inputStyle}>
+                        <option value="" disabled>Selecione</option>
+                        {[1, 3, 7].map(days => <option key={days} value={days}>{days} {days === 1 ? "dia" : "dias"}</option>)}
+                      </select>
+                    </label>
+                    {exchangeDressingDays && (
+                      <div style={{ fontSize: 13, color: "#475569" }}>
+                        {exchangeDressingDays === "1" ? "Válido até: " : "Troca prevista: "}<strong>{dateLabel(addDays(today, Number(exchangeDressingDays) - 1))}</strong>
+                        {exchangeDressingDays === "1" && " (hoje; vencido a partir de amanhã)"}
+                      </div>
+                    )}
+                  </>
+                )}
 
                 <label style={{ display: "grid", gap: 6, fontSize: 13 }}>
                   Profissional responsável *
@@ -594,8 +850,11 @@ export default function Home() {
                     style={inputStyle}
                     required
                   >
-                    <option value="Troca programada">Troca programada</option>
-                    <option value="Troca por obstrução">Troca por obstrução</option>
+                    {exchangeKind !== "catheter" && <option value="Troca programada">Troca programada</option>}
+                    {exchangeKind === "catheter" && <option value="" disabled>Selecione o motivo</option>}
+                    {exchangeKind === "dressing" && <option value="Curativo sujo ou úmido">Curativo sujo ou úmido</option>}
+                    {exchangeKind === "dressing" && <option value="Curativo solto">Curativo solto</option>}
+                    {exchangeKind !== "dressing" && <option value="Troca por obstrução">Troca por obstrução</option>}
                     <option value="Troca por infecção">Troca por infecção</option>
                     <option value="Troca por vazamento">Troca por vazamento</option>
                     <option value="Troca por mobilidade">Troca por mobilidade</option>
@@ -615,9 +874,16 @@ export default function Home() {
                 </label>
               </div>
 
+              {error && (
+                <p role="alert" style={{ color: "#b91c1c", background: "#fef2f2", padding: 12, borderRadius: 9, overflowWrap: "anywhere" }}>
+                  {error}
+                </p>
+              )}
+
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                 <button
                   type="button"
+                  disabled={busy}
                   onClick={() => setExchangePatient(null)}
                   style={{ ...primaryButton, background: "#e2e8f0", color: "#334155" }}
                 >
@@ -626,13 +892,13 @@ export default function Home() {
 
                 <button
                   type="button"
-                  disabled={busy || !exchangeProfessional.trim()}
+                  disabled={busy || !exchangeProfessional.trim() || !exchangeReason.trim() || (exchangeKind !== "connector" && !exchangeDressingDays)}
                   onClick={() => {
                     void registerExchange(exchangePatient);
                   }}
-                  style={{ ...primaryButton, opacity: (busy || !exchangeProfessional.trim()) ? 0.6 : 1 }}
+                  style={{ ...primaryButton, opacity: (busy || !exchangeProfessional.trim() || !exchangeReason.trim() || (exchangeKind !== "connector" && !exchangeDressingDays)) ? 0.6 : 1 }}
                 >
-                  {busy ? "Registrando…" : "Confirmar troca"}
+                  {busy ? "Registrando…" : exchangeKind === "catheter" ? "Confirmar troca do cateter" : exchangeKind === "dressing" ? "Confirmar troca do curativo" : "Confirmar troca"}
                 </button>
               </div>
             </section>
@@ -675,6 +941,10 @@ export default function Home() {
                 Total: <strong>{cards.length}</strong> {cards.length === 1 ? "paciente" : "pacientes"}
               </div>
             </div>
+
+            <p style={{ margin: "0 0 16px", fontSize: 12, color: "#64748b" }}>
+              As colunas seguem o prazo do conector. O prazo do curativo aparece separadamente em cada cartão.
+            </p>
 
             {cards.length === 0 && query ? (
               <div style={{ textAlign: "center", padding: "40px 20px", color: "#64748b" }}>
@@ -754,8 +1024,8 @@ export default function Home() {
                           </div>
                         ) : (
                           <div style={{ display: "grid", gap: 12 }}>
-                            {colCards.map(({ patient, cycle, status }) => {
-                              const diff = (cycle && cycle.start_date) ? dayNumber(todayFortaleza()) - dayNumber(cycle.start_date) : null;
+                            {colCards.map(({ patient, cycle, status, dressing }) => {
+                              const diff = (cycle && cycle.start_date) ? dayNumber(today) - dayNumber(cycle.start_date) : null;
                               const cycleDayLabel = diff === null
                                 ? "Sem ciclo ativo"
                                 : diff < 0
@@ -841,7 +1111,15 @@ export default function Home() {
 
                                   <div style={{ fontSize: 12, color: "#475569", display: "grid", gap: 4 }}>
                                     <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
-                                      <span style={{ color: "#64748b" }}>Instalação (Dia 1):</span>
+                                      <span style={{ color: "#64748b" }}>Instalação do cateter:</span>
+                                      <strong>{patient.catheter_installed_date ? dateLabel(patient.catheter_installed_date) : "Não informada"}</strong>
+                                    </div>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
+                                      <span style={{ color: "#64748b" }} title="A instalação conta como Dia 1. O cateter não tem troca automática por prazo.">Dias do cateter:</span>
+                                      <strong>{catheterAgeLabel(patient.catheter_installed_date, today)}</strong>
+                                    </div>
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
+                                      <span style={{ color: "#64748b" }}>Conector (Dia 1):</span>
                                       <strong>{cycle?.start_date ? dateLabel(cycle.start_date) : "—"}</strong>
                                     </div>
                                     <div style={{ display: "flex", justifyContent: "space-between", gap: 4 }}>
@@ -852,10 +1130,25 @@ export default function Home() {
                                     </div>
                                   </div>
 
+                                  <div style={{ background: dressing.bg, border: `1px solid ${dressing.color}30`, borderRadius: 8, padding: 10, fontSize: 12, display: "grid", gap: 5 }}>
+                                    <strong style={{ color: dressing.color }}>
+                                      Curativo{patient.dressing_duration_days ? ` · ${patient.dressing_duration_days} ${patient.dressing_duration_days === 1 ? "dia" : "dias"}` : ""}
+                                    </strong>
+                                    <span style={{ color: dressing.color, fontWeight: 700 }}>{dressing.label}</span>
+                                    {dressing.due && (
+                                      <>
+                                        <span>Aplicado: {dateLabel(patient.dressing_applied_date)}{dressing.day ? ` · Dia ${dressing.day}` : ""}</span>
+                                        <span>{patient.dressing_duration_days === 1 ? "Válido até: " : "Troca prevista: "}<strong>{dateLabel(dressing.due)}</strong></span>
+                                      </>
+                                    )}
+                                  </div>
+
                                   {cycle && (
                                     <button
                                       disabled={busy}
                                       onClick={() => {
+                                        setError("");
+                                        setExchangeKind("connector");
                                         setExchangePatient(patient);
                                         setExchangeReason("Troca programada");
                                         setExchangeProfessional(staff?.full_name ?? "");
@@ -872,9 +1165,51 @@ export default function Home() {
                                         opacity: busy ? 0.65 : 1,
                                       }}
                                     >
-                                      <RefreshCw size={14} /> Registrar troca
+                                      <RefreshCw size={14} /> Registrar troca do conector
                                     </button>
                                   )}
+                                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 }}>
+                                  <button
+                                    disabled={busy || !cycle || !!cycle.closed_at || cycle.status !== "active"}
+                                    onClick={() => {
+                                      setError("");
+                                      setExchangeKind("catheter");
+                                      setExchangePatient(patient);
+                                      setExchangeCatheterType(patient.catheter_type);
+                                      setExchangeDressingDays(patient.dressing_duration_days ? String(patient.dressing_duration_days) : "");
+                                      setExchangeReason("");
+                                      setExchangeProfessional(staff.full_name);
+                                      setExchangeNotes("");
+                                    }}
+                                    style={{
+                                      ...primaryButton,
+                                      gap: 4,
+                                      padding: "6px 4px",
+                                      fontSize: 10,
+                                      background: "#f8fafc",
+                                      color: "#475569",
+                                      border: "1px solid #cbd5e1",
+                                      opacity: busy || !cycle || !!cycle.closed_at || cycle.status !== "active" ? 0.6 : 1,
+                                    }}
+                                  >
+                                    <RefreshCw size={12} /> Trocar cateter
+                                  </button>
+                                  <button
+                                    disabled={busy}
+                                    onClick={() => {
+                                      setError("");
+                                      setExchangeKind("dressing");
+                                      setExchangePatient(patient);
+                                      setExchangeDressingDays(patient.dressing_duration_days ? String(patient.dressing_duration_days) : "");
+                                      setExchangeReason("Troca programada");
+                                      setExchangeProfessional(staff.full_name);
+                                      setExchangeNotes("");
+                                    }}
+                                    style={{ ...primaryButton, gap: 4, padding: "6px 4px", fontSize: 10, background: "#f8fafc", color: "#475569", border: "1px solid #cbd5e1", opacity: busy ? 0.6 : 1 }}
+                                  >
+                                    <RefreshCw size={12} /> Trocar curativo
+                                  </button>
+                                  </div>
                                 </article>
                               );
                             })}
@@ -899,10 +1234,29 @@ export default function Home() {
                       <tr key={event.id}>
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{dateLabel(event.event_date)}</td>
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{patients.find(p => p.id === event.patient_id)?.full_name ?? "Paciente"}</td>
-                        <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.event_type}</td>
+                        <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>
+                          {event.event_type === "follow_up_closed" && event.reason === "Alta hospitalar" ? "Alta" : eventLabels[event.event_type] ?? event.event_type}
+                          {event.event_type === "catheter_exchange" && event.details && (
+                            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+                              {event.details.previous_catheter_type} → {event.details.new_catheter_type}<br />
+                              Instalação: {dateLabel(event.details.previous_catheter_installed_date)} → {dateLabel(event.details.new_catheter_installed_date)}
+                            </div>
+                          )}
+                          {event.event_type === "dressing_exchange" && event.details && (
+                            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+                              Curativo de {event.details.new_dressing_duration_days} {event.details.new_dressing_duration_days === 1 ? "dia" : "dias"}<br />
+                              Aplicado: {dateLabel(event.details.new_dressing_applied_date)} · Troca prevista: {dateLabel(event.details.new_dressing_due_date)}
+                            </div>
+                          )}
+                          {event.event_type === "registration" && event.details?.dressing_duration_days && (
+                            <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>
+                              Curativo de {event.details.dressing_duration_days} {event.details.dressing_duration_days === 1 ? "dia" : "dias"} · Aplicado: {dateLabel(event.details.dressing_applied_date)}
+                            </div>
+                          )}
+                        </td>
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.professional_name}</td>
                         <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.reason ?? "—"}</td>
-                        <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.notes?.trim() ? event.notes : "—"}</td>
+                        <td style={{ padding: 10, borderBottom: "1px solid #f1f5f9" }}>{event.notes?.trim() || event.details?.notes?.trim() || "—"}</td>
                       </tr>
                     ))}
                   </tbody>
